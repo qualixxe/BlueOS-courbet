@@ -690,7 +690,7 @@ def main():
             from datetime import datetime, timezone
             args.output_name = (
                 f"BlueOS-{args.version}-{args.device}-"
-                f"{datetime.now(timezone.utc):%Y%m%d}.zip"
+                f"{datetime.now(timezone.utc):%Y%m%d}-qualixxe096.zip"
             )
         run_build(args, report)
 

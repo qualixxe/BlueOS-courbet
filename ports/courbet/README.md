@@ -96,6 +96,6 @@ ports/courbet/
 - [GDmio/BlueOS](https://github.com/GDmio/BlueOS) — BlueOS и GSI.
 - [LineageOS](https://lineageos.org) — база, AOSP releasetools и testkey.
 - [Aciss21](https://github.com/Aciss21) — деревья устройств courbet/sm6150 для Android 17.
-- Порт и CI: [@qualixxe096](https://github.com/qualixxe096).
+- Порт и CI: @qualixxe096.
 
 BlueOS распространяется под лицензией из корня репозитория; сторонние компоненты — под своими лицензиями.
