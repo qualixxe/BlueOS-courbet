@@ -158,6 +158,7 @@ jobs:
             out/report.json
           if-no-files-found: warn
           retention-days: 14
+          compression-level: 0
 
       - name: Create release
         if: inputs.release_tag != ''
