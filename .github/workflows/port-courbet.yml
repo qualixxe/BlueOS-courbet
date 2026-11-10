@@ -1,0 +1,188 @@
+name: Port BlueOS to courbet
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inspect — only report base/GSI; build — make recovery zip"
+        type: choice
+        options: [inspect, build]
+        default: inspect
+      base_url:
+        description: "LineageOS 24.0 courbet base package"
+        required: false
+        default: "https://drive.google.com/file/d/1b9FppsYuU13UjRSQeUDDmIGW0mTWA3X0/view?usp=sharing"
+      base_name:
+        description: "Base file name"
+        required: false
+        default: "lineage-24.0-20261106-UNOFFICIAL-courbet.zip"
+      gsi_tag:
+        description: "BlueOS GSI release tag"
+        required: false
+        default: "v0.8.1-gsi-treble"
+      gsi_asset:
+        description: "BlueOS GSI asset name"
+        required: false
+        default: "BlueOS-0.8.1-gsi_arm64_bvN4-20261107-2.img.gz"
+      version:
+        description: "BlueOS version for the output file name"
+        required: false
+        default: "0.8.1"
+      release_tag:
+        description: "Optional GitHub release tag; empty = artifact only"
+        required: false
+        default: ""
+      allow_key_mismatch:
+        description: "Allow signing with testkey when the base uses another key"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: port-courbet-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  port:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      BASE_NAME: ${{ inputs.base_name }}
+      GSI_REPO: GDmio/BlueOS
+      GSI_TAG: ${{ inputs.gsi_tag }}
+      GSI_ASSET: ${{ inputs.gsi_asset }}
+      BLUEOS_VERSION: ${{ inputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            unzip openssl android-sdk-libsparse-utils python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --quiet --upgrade pip
+          pip install --quiet gdown brotli
+          python --version
+          openssl version
+
+      - name: Download base package
+        run: |
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/$BASE_NAME"
+          ok=0
+          for attempt in 1 2 3; do
+            rm -f "$BASE"
+            if .venv/bin/gdown "$BASE_URL" -O "$BASE" --retries 3; then ok=1; break; fi
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            ID="$(printf '%s' "$BASE_URL" | sed -n 's#.*/d/\([A-Za-z0-9_-]*\).*#\1#p')"
+            test -n "$ID"
+            curl -fL --retry 3 --retry-delay 10 \
+              -o "$BASE" "https://drive.usercontent.google.com/download?id=$ID&export=download&confirm=t"
+          fi
+          ls -lh "$BASE"
+          python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print('entries:', len(z.infolist()))" "$BASE"
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+
+      - name: Download BlueOS GSI
+        run: |
+          set -euo pipefail
+          URL="https://github.com/$GSI_REPO/releases/download/$GSI_TAG"
+          GSI="$RUNNER_TEMP/$GSI_ASSET"
+          curl -fL --retry 3 --retry-delay 5 -o "$GSI" "$URL/$GSI_ASSET"
+          curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/SHA256SUMS" "$URL/SHA256SUMS"
+          (cd "$RUNNER_TEMP" && sha256sum -c SHA256SUMS --ignore-missing)
+          ls -lh "$GSI"
+          echo "GSI=$GSI" >> "$GITHUB_ENV"
+
+      - name: Prepare AOSP test key
+        run: |
+          set -euo pipefail
+          KEY_URL="https://raw.githubusercontent.com/LineageOS/android_build/lineage-24.0/target/product/security"
+          curl -fsSL -o "$RUNNER_TEMP/testkey.pk8" "$KEY_URL/testkey.pk8"
+          curl -fsSL -o "$RUNNER_TEMP/testkey.x509.pem" "$KEY_URL/testkey.x509.pem"
+          openssl pkcs8 -inform DER -in "$RUNNER_TEMP/testkey.pk8" -nocrypt \
+            -out "$RUNNER_TEMP/testkey.key"
+          openssl x509 -in "$RUNNER_TEMP/testkey.x509.pem" -noout -subject -fingerprint -sha256
+
+      - name: Inspect base and GSI
+        if: inputs.mode == 'inspect'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          .venv/bin/python ports/courbet/ci/port.py inspect \
+            --base "$BASE" --gsi "$GSI" --report out/report.json --device courbet
+          cat out/report.json
+
+      - name: Build recovery package
+        if: inputs.mode == 'build'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "${{ inputs.allow_key_mismatch }}" = "true" ]; then
+            EXTRA="--allow-key-mismatch"
+          fi
+          .venv/bin/python ports/courbet/ci/port.py build \
+            --base "$BASE" --gsi "$GSI" --report out/report.json --device courbet \
+            --out-dir out --work-dir out/work \
+            --key "$RUNNER_TEMP/testkey.key" --cert "$RUNNER_TEMP/testkey.x509.pem" \
+            --version "$BLUEOS_VERSION" $EXTRA
+          cat out/report.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueOS-courbet-${{ github.run_number }}-${{ inputs.mode }}
+          path: |
+            out/*.zip
+            out/SHA256SUMS
+            out/report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Create release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag }}"
+          FILE="$(ls out/*.zip | head -1)"
+          SIZE="$(stat -c%s "$FILE")"
+          if [ "$SIZE" -gt 1900000000 ]; then
+            rm -f out/*.part-*
+            split -b 1900M -d -a 1 "$FILE" "$FILE.part-"
+            cat > out/JOIN.txt <<EOF
+          Package is split because GitHub release assets are limited to 2 GiB.
+          Download every .part-* file and join them:
+            cat "$(basename "$FILE").part-"* > "$(basename "$FILE")"
+          Then check SHA256SUMS.
+          EOF
+            gh release create "$TAG" "$FILE".part-* out/JOIN.txt out/SHA256SUMS \
+              --title "BlueOS $BLUEOS_VERSION for courbet" \
+              --notes "BlueOS port: LineageOS 24.0 courbet base + BlueOS $BLUEOS_VERSION GSI (TrebleDroid). See ports/courbet/README.md."
+          else
+            gh release create "$TAG" "$FILE" out/SHA256SUMS \
+              --title "BlueOS $BLUEOS_VERSION for courbet" \
+              --notes "BlueOS port: LineageOS 24.0 courbet base + BlueOS $BLUEOS_VERSION GSI (TrebleDroid). See ports/courbet/README.md."
+          fi
