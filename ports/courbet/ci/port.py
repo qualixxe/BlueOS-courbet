@@ -20,6 +20,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -498,6 +499,15 @@ def run_inspect(args, report):
             },
         }
     )
+    signature = read_ota_signature(args.base)
+    if signature:
+        with tempfile.TemporaryDirectory(prefix="blueos-inspect-") as workdir:
+            subject, fingerprint = openssl_cert_info(
+                signature["der"], workdir, "base-signer"
+            )
+        report["base_signer"] = {"subject": subject, "sha256": fingerprint}
+    else:
+        report["base_signer"] = None
 
 
 def run_build(args, report):
