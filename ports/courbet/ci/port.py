@@ -90,6 +90,7 @@ def detect_ota(base_zip):
         info = zip_entries(zf)
         result = {
             "entries": len(names),
+            "entry_names": sorted(names),
             "payload_bin": "payload.bin" in names,
             "system_entries": {
                 name: info[name].file_size
@@ -121,6 +122,10 @@ def detect_ota(base_zip):
         if "dynamic_partitions_opinfo" in names:
             result["dynamic_partitions_opinfo"] = zf.read(
                 "dynamic_partitions_opinfo"
+            ).decode("utf-8", "replace")
+        if "META-INF/com/google/android/updater-script" in names:
+            result["updater_script"] = zf.read(
+                "META-INF/com/google/android/updater-script"
             ).decode("utf-8", "replace")
         return result
 
