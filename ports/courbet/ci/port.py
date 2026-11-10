@@ -97,7 +97,7 @@ def detect_ota(base_zip):
                 for name in sorted(names)
                 if any(name == "system" + suffix for suffix in SYSTEM_DATA_SUFFIXES)
             },
-            "has_dynamic_partitions_opinfo": "dynamic_partitions_opinfo" in names,
+            "has_dynamic_partitions_op_list": "dynamic_partitions_op_list" in names,
             "has_boot_img": "boot.img" in names,
             "has_dtbo_img": "dtbo.img" in names,
             "has_vbmeta_img": "vbmeta.img" in names,
@@ -119,9 +119,9 @@ def detect_ota(base_zip):
                 result["transfer_version"] = int(lines[0])
             if len(lines) > 1:
                 result["transfer_blocks"] = int(lines[1])
-        if "dynamic_partitions_opinfo" in names:
-            result["dynamic_partitions_opinfo"] = zf.read(
-                "dynamic_partitions_opinfo"
+        if "dynamic_partitions_op_list" in names:
+            result["dynamic_partitions_op_list"] = zf.read(
+                "dynamic_partitions_op_list"
             ).decode("utf-8", "replace")
         if "META-INF/com/google/android/updater-script" in names:
             result["updater_script"] = zf.read(
@@ -130,7 +130,7 @@ def detect_ota(base_zip):
         return result
 
 
-def parse_opinfo(text):
+def parse_op_list(text):
     groups = {}
     partition_sizes = {}
     partition_groups = {}
@@ -152,13 +152,13 @@ def parse_opinfo(text):
     return groups, partition_sizes, partition_groups
 
 
-def resize_system_in_opinfo(text, new_size):
-    groups, sizes, groups_of = parse_opinfo(text)
+def resize_system_in_op_list(text, new_size):
+    groups, sizes, groups_of = parse_op_list(text)
     if not sizes:
-        return None, "dynamic_partitions_opinfo is not a text op list"
+        return None, "dynamic_partitions_op_list is not a text op list"
     old_size = sizes.get("system")
     if old_size is None:
-        return None, "no 'resize system <size>' line in dynamic_partitions_opinfo"
+        return None, "no 'resize system <size>' line in dynamic_partitions_op_list"
     group = groups_of.get("system")
     if group and group in groups and groups[group] > 0:
         total = 0
@@ -478,7 +478,7 @@ def rebuild_zip(base_zip, out_zip, replacements, replacement_bytes, drop):
 def run_inspect(args, report):
     base = detect_ota(args.base)
     gsi = inspect_gsi(args.gsi)
-    groups, sizes, groups_of = parse_opinfo(base.pop("dynamic_partitions_opinfo", None))
+    groups, sizes, groups_of = parse_op_list(base.pop("dynamic_partitions_op_list", None))
     gsi_blocks = align_up(gsi["raw_size"]) // BLOCK
     partition_size = sizes.get("system")
     base_image_size = (
@@ -489,7 +489,7 @@ def run_inspect(args, report):
         {
             "base": base,
             "gsi": gsi,
-            "opinfo": {
+            "op_list": {
                 "groups": groups,
                 "partition_sizes": {k: human(v) for k, v in sizes.items()},
                 "partition_groups": groups_of,
@@ -500,7 +500,7 @@ def run_inspect(args, report):
                 "gsi_raw_size": human(gsi["raw_size"]),
                 "gsi_blocks": gsi_blocks,
                 "fits_without_resize": bool(fit_limit and gsi["raw_size"] <= fit_limit),
-                "needs_opinfo_resize": bool(fit_limit and gsi["raw_size"] > fit_limit),
+                "needs_op_list_resize": bool(fit_limit and gsi["raw_size"] > fit_limit),
             },
         }
     )
@@ -537,7 +537,7 @@ def run_build(args, report):
         base_blocks = int(base_transfer[1])
         if base_version != 4:
             die(f"unsupported base transfer list version {base_version}")
-        opinfo = zf.read("dynamic_partitions_opinfo").decode() if "dynamic_partitions_opinfo" in names else None
+        op_list = zf.read("dynamic_partitions_op_list").decode() if "dynamic_partitions_op_list" in names else None
 
     compression = None
     for suffix, mode in ((".new.dat.br", "br"), (".new.dat.bz2", "bz2"), (".new.dat", "none")):
@@ -547,7 +547,7 @@ def run_build(args, report):
     if compression is None:
         die("base has no known system.new.dat entry")
 
-    partition_size = parse_opinfo(opinfo)[1].get("system")
+    partition_size = parse_op_list(op_list)[1].get("system")
     fit_limit = max(filter(None, [partition_size, base_blocks * BLOCK]), default=None)
     report["fit"] = {
         "system_partition_size": human(partition_size) if partition_size else None,
@@ -563,14 +563,14 @@ def run_build(args, report):
 
     replacement_bytes = {}
     if fit_limit is not None and gsi_size > fit_limit:
-        if not opinfo:
-            die("GSI does not fit and there is no dynamic_partitions_opinfo to resize")
-        new_opinfo, error = resize_system_in_opinfo(opinfo, gsi_size)
+        if not op_list:
+            die("GSI does not fit and there is no dynamic_partitions_op_list to resize")
+        new_op_list, error = resize_system_in_op_list(op_list, gsi_size)
         if error:
             die(f"cannot resize system partition: {error}")
-        replacement_bytes["dynamic_partitions_opinfo"] = new_opinfo.encode()
-        opinfo = new_opinfo
-        log(f"Resized system in dynamic_partitions_opinfo to {human(gsi_size)}")
+        replacement_bytes["dynamic_partitions_op_list"] = new_op_list.encode()
+        op_list = new_op_list
+        log(f"Resized system in dynamic_partitions_op_list to {human(gsi_size)}")
 
     log("Computing block transfer list")
     image = FileImage(str(gsi_img))

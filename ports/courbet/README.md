@@ -40,7 +40,7 @@ Workflow: [`.github/workflows/port-courbet.yml`](../../.github/workflows/port-co
 Режим `inspect` (ключи и build-окружение не нужны) пишет `report.json`:
 
 - список записей базового zip, наличие `payload.bin`;
-- версия и размер `system.transfer.list`, содержимое `dynamic_partitions_opinfo`;
+- версия и размер `system.transfer.list`, содержимое `dynamic_partitions_op_list`;
 - размер системного раздела в базе и в GSI, помещается ли GSI без resize;
 - тип ФС GSI (ext4/erofs/sparse), сырой размер, SHA-256;
 - сертификат подписи базы (subject).
@@ -48,9 +48,9 @@ Workflow: [`.github/workflows/port-courbet.yml`](../../.github/workflows/port-co
 Режим `build`:
 
 1. Распаковывает GSI (gzip; при необходимости `simg2img`), проверяет, что это `system`-образ.
-2. Если GSI больше системного раздела — переписывает `resize system <size>` в `dynamic_partitions_opinfo`, предварительно проверив ёмкость группы `qti_dynamic_partitions`.
+2. Если GSI больше системного раздела — переписывает `resize system <size>` в `dynamic_partitions_op_list`, предварительно проверив ёмкость группы `qti_dynamic_partitions`.
 3. Считает полный список переноса блоков через AOSP `BlockImageDiff` (v4, только команды `new`/`zero`) и собирает `system.new.dat`, сжимает в `system.new.dat.br` (brotli).
-4. Пересобирает OTA: заменяет `system.transfer.list`, `system.new.dat.br` и `dynamic_partitions_opinfo`, удаляет старые блочные данные `system`.
+4. Пересобирает OTA: заменяет `system.transfer.list`, `system.new.dat.br` и `dynamic_partitions_op_list`, удаляет старые блочные данные `system`.
 5. Проверяет размеры (`total_blocks`, размер `new.dat`) и подписывает zip целиком: CMS/PKCS#7 без подписанных атрибутов, SHA-256, в комментарии EOCD — в формате, который понимает verifier LineageOS/Android recovery.
 6. Пишет `report.json` и `SHA256SUMS`.
 
