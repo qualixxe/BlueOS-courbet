@@ -556,6 +556,25 @@ def run_build(args, report):
         "fits_without_resize": bool(fit_limit and gsi["raw_size"] <= fit_limit),
     }
 
+    sig = read_ota_signature(args.base)
+    if sig:
+        subject, fingerprint = openssl_cert_info(sig["der"], workdir, "base-signer")
+        report["base_signer"] = {"subject": subject, "sha256": fingerprint}
+        verify_ota_signature(args.base, Path(workdir) / "base-signer.der", sig["signed_bytes"])
+        expected = cert_fingerprint(args.cert)
+        if fingerprint != expected and not args.allow_key_mismatch:
+            die(
+                "base is signed with a different key:\n"
+                f"  base:    {subject} {fingerprint}\n"
+                f"  testkey: {expected}\n"
+                "The base recovery may reject a testkey-signed port. "
+                "Pass --allow-key-mismatch only if the recovery permits unverified packages "
+                "or trusts test-keys."
+            )
+    else:
+        report["base_signer"] = None
+        log("WARNING: base package has no whole-file signature")
+
     gsi_img = workdir / "system.img"
     decompress_gsi(args.gsi, gsi_img)
     gsi_size = os.path.getsize(gsi_img)
@@ -621,26 +640,6 @@ def run_build(args, report):
 
     if os.path.getsize(unsigned) > 4 * 1024 ** 3:
         log("WARNING: unsigned zip is over 4 GiB; some recoveries cannot handle it")
-
-    sig = read_ota_signature(args.base)
-    base_signer = None
-    if sig:
-        subject, fingerprint = openssl_cert_info(sig["der"], workdir, "base-signer")
-        base_signer = {"subject": subject, "sha256": fingerprint}
-        report["base_signer"] = base_signer
-        verify_ota_signature(args.base, Path(workdir) / "base-signer.der", sig["signed_bytes"])
-        expected = cert_fingerprint(args.cert)
-        if fingerprint != expected and not args.allow_key_mismatch:
-            die(
-                "base is signed with a different key:\n"
-                f"  base:    {subject} {fingerprint}\n"
-                f"  testkey: {expected}\n"
-                "The base recovery would reject a testkey-signed port. "
-                "Pass --allow-key-mismatch only for flashing via a recovery that trusts test-keys."
-            )
-    else:
-        report["base_signer"] = None
-        log("WARNING: base package has no whole-file signature")
 
     signed = out_dir / args.output_name
     total_comment = sign_ota(unsigned, signed, args.key, args.cert, workdir)
