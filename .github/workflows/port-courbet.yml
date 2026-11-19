@@ -74,13 +74,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            unzip openssl android-sdk-libsparse-utils python3-venv
+            unzip openssl e2fsprogs android-sdk-libsparse-utils python3-venv
           python3 -m venv .venv
           . .venv/bin/activate
           pip install --quiet --upgrade pip
           pip install --quiet gdown brotli
           python --version
           openssl version
+
+      - name: Test port tools
+        run: .venv/bin/python -m unittest discover -s ports/courbet/ci -p 'test_*.py' -v
 
       - name: Download base package
         run: |

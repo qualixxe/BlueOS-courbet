@@ -84,6 +84,18 @@ def zip_entries(zf):
     return {item.filename: item for item in zf.infolist()}
 
 
+def prepare_updater_script(script):
+    script = re.sub(
+        r'(?m)^[ \t]*run_program\("/tmp/install/bin/backuptool\.sh", '
+        r'"(?:backup|restore)", map_partition\("system"\), "ext4"\);[ \t]*\r?\n?',
+        "",
+        script,
+    )
+    if "backuptool.sh" in script:
+        die("unsupported addon.d invocation in base updater-script")
+    return script
+
+
 def detect_ota(base_zip):
     with zipfile.ZipFile(base_zip) as zf:
         names = set(zf.namelist())
@@ -224,6 +236,110 @@ def decompress_gsi(gsi, target):
         subprocess.run(["simg2img", str(target), raw], check=True)
         os.replace(raw, target)
     log(f"Unpacked GSI: {human(os.path.getsize(target))}")
+
+
+def patch_vndk_script(data):
+    fallback = (
+        b'\tif [ -z "$vndk_version" ]; then\n'
+        b"\t\tvndk_version=$(grep -m1 '^ro\\.vendor\\.build\\.version\\.sdk=' /vendor/build.prop 2>/dev/null | cut -d= -f2)\n"
+        b'\tfi\n'
+    )
+    anchor = b'if [ -z "$(getprop persist.sys.vndk)" ]; then\n'
+    if data.count(fallback) != 1 or data.count(anchor) != 1:
+        die("unexpected VNDK detection script in GSI")
+    clear_stale = (
+        b'if [ "$(getprop persist.sys.vndk)" = 37 ]; then\n'
+        b'\tsetprop persist.sys.vndk ""\n'
+        b'fi\n\n'
+    )
+    patched = data.replace(fallback, b"").replace(anchor, clear_stale + anchor)
+    if len(patched) > len(data):
+        die("VNDK patch exceeds original file size")
+    return patched + b" " * (len(data) - len(patched))
+
+
+def patch_courbet_audio_script(data):
+    block = (
+        b'if [ $(find /vendor/etc/audio -type f |wc -l) -le 3 ];then\n'
+        b'\tmount -o bind /mnt/phh/empty_dir /vendor/etc/audio || true\n'
+        b'fi\n'
+    )
+    if data.count(block) != 1:
+        die("unexpected audio directory heuristic in GSI")
+    # find does not follow courbet's SKU symlink and would hide valid configs.
+    return data.replace(block, b"") + b" " * len(block)
+
+
+def rewrite_ext4_file(image, source, old, new):
+    if len(new) != len(old):
+        die("in-place ext4 replacement must preserve file length")
+    with open(image, "r+b") as stream:
+        stream.seek(1080)
+        if stream.read(2) != b"\x53\xef":
+            die("in-place GSI patch requires ext4")
+        stream.seek(1024 + 24)
+        if struct.unpack("<I", stream.read(4))[0] != 2:
+            die("GSI ext4 block size is not 4096")
+        block_size = BLOCK
+        mappings = []
+        for index, start in enumerate(range(0, len(old), block_size)):
+            result = subprocess.run(
+                ["debugfs", "-R", f"bmap {source} {index}", str(Path(image).resolve())],
+                check=True, capture_output=True, text=True,
+            )
+            physical = int(result.stdout.strip())
+            if physical <= 0:
+                die("cannot rewrite a sparse ext4 file")
+            offset = physical * block_size
+            chunk = old[start:start + block_size]
+            stream.seek(offset)
+            if stream.read(len(chunk)) != chunk:
+                die("ext4 block mapping differs from dumped file")
+            mappings.append((offset, start, len(chunk)))
+        # Preserve inode metadata, allocation and SELinux labels.
+        for offset, start, length in mappings:
+            stream.seek(offset)
+            stream.write(new[start:start + length])
+
+
+def find_ext4_path(image, candidates):
+    for source in candidates:
+        result = subprocess.run(
+            ["debugfs", "-R", f"stat {source}", str(Path(image).resolve())],
+            check=False, capture_output=True,
+        )
+        if result.returncode == 0 and b"Inode:" in result.stdout:
+            return source
+    die(f"none of the expected files exists in GSI: {', '.join(candidates)}")
+
+def patch_gsi_vndk(image, workdir):
+    source = find_ext4_path(
+        image, ["/bin/vndk-detect", "/system/bin/vndk-detect"]
+    )
+    dump = Path(workdir).resolve() / "vndk-detect.original"
+    subprocess.run(
+        ["debugfs", "-R", f"dump {source} {dump.name}", str(Path(image).resolve())],
+        cwd=dump.parent, check=True, capture_output=True,
+    )
+    original = dump.read_bytes()
+    rewrite_ext4_file(image, source, original, patch_vndk_script(original))
+    subprocess.run(["e2fsck", "-f", "-n", str(Path(image).resolve())], check=True)
+    log("Removed SDK-as-VNDK fallback; ext4 metadata unchanged")
+
+
+def patch_gsi_courbet_audio(image, workdir):
+    source = find_ext4_path(
+        image, ["/bin/rw-system.sh", "/system/bin/rw-system.sh"]
+    )
+    dump = Path(workdir).resolve() / "rw-system.original"
+    subprocess.run(
+        ["debugfs", "-R", f"dump {source} {dump.name}", str(Path(image).resolve())],
+        cwd=dump.parent, check=True, capture_output=True,
+    )
+    original = dump.read_bytes()
+    rewrite_ext4_file(image, source, original, patch_courbet_audio_script(original))
+    subprocess.run(["e2fsck", "-f", "-n", str(Path(image).resolve())], check=True)
+    log("Preserved courbet SKU audio configs; ext4 metadata unchanged")
 
 
 def read_ota_signature(zip_path):
@@ -538,6 +654,9 @@ def run_build(args, report):
         if base_version != 4:
             die(f"unsupported base transfer list version {base_version}")
         op_list = zf.read("dynamic_partitions_op_list").decode() if "dynamic_partitions_op_list" in names else None
+        updater_script = prepare_updater_script(
+            zf.read("META-INF/com/google/android/updater-script").decode()
+        )
 
     compression = None
     for suffix, mode in ((".new.dat.br", "br"), (".new.dat.bz2", "bz2"), (".new.dat", "none")):
@@ -577,10 +696,21 @@ def run_build(args, report):
 
     gsi_img = workdir / "system.img"
     decompress_gsi(args.gsi, gsi_img)
+    patch_gsi_vndk(gsi_img, workdir)
+    patch_gsi_courbet_audio(gsi_img, workdir)
+    report["gsi_patches"] = [
+        "remove_sdk_as_vndk_fallback", "clear_stale_persist_sys_vndk_37",
+        "preserve_courbet_sku_audio_directory",
+    ]
+    report["patched_system_sha256"] = sha256_file(gsi_img)
     gsi_size = os.path.getsize(gsi_img)
     gsi_blocks = gsi_size // BLOCK
 
-    replacement_bytes = {}
+    replacement_bytes = {
+        "META-INF/com/google/android/updater-script": updater_script.encode(),
+        "META-INF/com/android/otacert": Path(args.cert).read_bytes(),
+    }
+    report["addon_restore_disabled"] = True
     if fit_limit is not None and gsi_size > fit_limit:
         if not op_list:
             die("GSI does not fit and there is no dynamic_partitions_op_list to resize")
