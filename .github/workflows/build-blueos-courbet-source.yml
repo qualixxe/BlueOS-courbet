@@ -1,0 +1,165 @@
+﻿name: Build BlueOS 0.9.0 from source (courbet)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: false
+        default: userdebug
+        type: choice
+        options: [userdebug, eng]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blueos-source-courbet-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      DEVICE: courbet
+      LINEAGE_BRANCH: lineage-24.0
+      BLUEOS_REVISION: refs/tags/v0.9.0
+      REPO_SYNC_JOBS: 4
+      BUILD_JOBS: 2
+      GOGC: "40"
+      GOMEMLIMIT: 8GiB
+      GOMAXPROCS: "2"
+
+    steps:
+      - name: Checkout port metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free runner disk
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/lib/node_modules /usr/share/miniconda /opt/az || true
+          sudo docker image prune -a -f || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install Android build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses-dev libssl-dev libxml2 \
+            libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
+            zip zlib1g-dev fontconfig python3 python-is-python3 unzip erofs-utils
+          git lfs install
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod 0755 "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "BlueOS CI"
+          git config --global user.email "blueos-ci@users.noreply.github.com"
+
+      - name: Initialize LineageOS 24.0
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/aosp"
+          cd "$GITHUB_WORKSPACE/aosp"
+          repo init --depth=1 -u https://github.com/LineageOS/android.git \
+            -b "$LINEAGE_BRANCH" --git-lfs --no-clone-bundle
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/courbet-blueos.xml <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="aciss" fetch="https://github.com/Aciss21" />
+            <remote name="blueos" fetch="https://github.com/GDmio" />
+
+            <project path="device/xiaomi/courbet" name="device_xiaomi_courbet" remote="aciss" revision="17" />
+            <project path="device/xiaomi/sm6150-common" name="device_xiaomi_sm6150-common" remote="aciss" revision="17" />
+            <project path="vendor/xiaomi/courbet" name="vendor_xiaomi_courbet" remote="aciss" revision="16.2" />
+            <project path="vendor/xiaomi/sm6150-common" name="vendor_xiaomi_sm6150-common" remote="aciss" revision="17" />
+            <project path="vendor/miuicamera-courbet" name="vendor_miuicamera-courbet" remote="aciss" revision="16" />
+            <project path="hardware/xiaomi" name="hardware_xiaomi" remote="aciss" revision="16" />
+            <project path="kernel/xiaomi/sm6150" name="kernel_xiaomi_sm6150" remote="aciss" revision="aosp" />
+            <project path="vendor/sony/dolby" name="vendor_sony_dolby" remote="aciss" revision="16" />
+            <project path="packages/apps/LunarisDolby" name="android_packages_apps_LunarisDolby" remote="aciss" revision="main" />
+            <project path="vendor/blueos" name="BlueOS" remote="blueos" revision="refs/tags/v0.9.0" />
+          </manifest>
+          XML
+          sed -i 's/^          //' .repo/local_manifests/courbet-blueos.xml
+          cat .repo/local_manifests/courbet-blueos.xml
+
+      - name: Sync source
+        working-directory: aosp
+        run: |
+          set -euxo pipefail
+          repo sync -c --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune -j"$REPO_SYNC_JOBS"
+          df -h /
+          du -sh .repo || true
+          # Git metadata is not needed by the Android build after checkout.
+          rm -rf .repo/project-objects .repo/projects .repo/manifests.git || true
+          df -h /
+
+      - name: Check device and attach BlueOS
+        working-directory: aosp
+        run: |
+          set -euxo pipefail
+          test -d device/xiaomi/courbet
+          test -d vendor/blueos
+          mkdir -p vendor/extra
+          grep -qxF '$(call inherit-product, vendor/blueos/config/blueos.mk)' vendor/extra/product.mk 2>/dev/null || \
+            echo '$(call inherit-product, vendor/blueos/config/blueos.mk)' >> vendor/extra/product.mk
+          test -f vendor/blueos/LICENSE
+          test -f vendor/blueos/NOTICE
+          git -C vendor/blueos describe --tags --exact-match || true
+
+      - name: Apply BlueOS patches and configure target
+        working-directory: aosp
+        run: |
+          set -euxo pipefail
+          source build/envsetup.sh
+          breakfast "$DEVICE" "${{ inputs.build_type }}"
+          lunch "lineage_${DEVICE}-${{ inputs.build_type }}"
+
+      - name: Build BlueOS ROM
+        working-directory: aosp
+        run: |
+          set -o pipefail
+          source build/envsetup.sh
+          lunch "lineage_${DEVICE}-${{ inputs.build_type }}"
+          m bacon -j"$BUILD_JOBS" 2>&1 | tee "$GITHUB_WORKSPACE/blueos-courbet-build.log"
+
+      - name: Collect build output
+        if: always()
+        run: |
+          set +e
+          OUT="$GITHUB_WORKSPACE/aosp/out/target/product/courbet"
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cp "$OUT"/BlueOS-*.zip "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp "$OUT"/lineage-*.zip "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp "$OUT"/recovery.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp "$OUT"/boot.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp "$OUT"/dtbo.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp "$OUT"/vendor_boot.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          (cd "$GITHUB_WORKSPACE/artifact" && sha256sum * > SHA256SUMS) 2>/dev/null || true
+          df -h /
+          find "$GITHUB_WORKSPACE/artifact" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort || true
+
+      - name: Upload ROM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueOS-0.9.0-courbet-source-${{ github.run_number }}
+          path: |
+            artifact/*
+            blueos-courbet-build.log
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+
