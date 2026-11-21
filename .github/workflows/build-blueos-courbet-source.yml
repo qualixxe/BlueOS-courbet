@@ -88,7 +88,7 @@ jobs:
             <project path="hardware/xiaomi" name="hardware_xiaomi" remote="aciss" revision="16" />
             <project path="kernel/xiaomi/sm6150" name="kernel_xiaomi_sm6150" remote="aciss" revision="aosp" />
             <project path="vendor/sony/dolby" name="vendor_sony_dolby" remote="aciss" revision="16" />
-            <project path="packages/apps/LunarisDolby" name="android_packages_apps_LunarisDolby" remote="aciss" revision="main" />
+            <project path="packages/apps/LunarisDolby" name="android_packages_apps_LunarisDolby" remote="aciss" revision="seventeen" />
             <project path="vendor/blueos" name="BlueOS" remote="blueos" revision="refs/tags/v0.9.0" />
           </manifest>
           XML
@@ -167,6 +167,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           compression-level: 0
+
 
 
 
