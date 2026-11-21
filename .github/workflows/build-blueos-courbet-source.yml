@@ -72,7 +72,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/aosp"
           cd "$GITHUB_WORKSPACE/aosp"
           repo init --depth=1 -u https://github.com/LineageOS/android.git \
-            -b "$LINEAGE_BRANCH" --git-lfs --no-clone-bundle
+            -b "$LINEAGE_BRANCH" --git-lfs --no-clone-bundle --partial-clone --clone-filter=blob:limit=10M
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/courbet-blueos.xml <<'XML'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -99,7 +99,12 @@ jobs:
         working-directory: aosp
         run: |
           set -euxo pipefail
-          repo sync -c --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune -j"$REPO_SYNC_JOBS"
+          df -h /
+          df -ih /
+          repo sync -c --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune --fail-fast -j"$REPO_SYNC_JOBS"
+          df -h /
+          df -ih /
+          du -sh .repo vendor platform 2>/dev/null || true
           df -h /
           du -sh .repo || true
           # Git metadata is not needed by the Android build after checkout.
@@ -162,5 +167,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           compression-level: 0
+
 
 
